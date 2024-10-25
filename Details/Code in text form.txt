@@ -1,0 +1,530 @@
+my thesis is based on separating 5 bengali commands for vehicular movements, they samne jao, pichone jao, dane jao, bame jao, theme jao. i only have 50 x 5 complete datasets where i divided for training and calidation as 40:10 and furthur divide the training as 30:10 for training and testing. this is my codes
+
+import os
+import librosa
+from tqdm import tqdm
+import pandas as pd
+import numpy as np
+from scipy.io import wavfile
+
+# Function to apply envelope-based noise reduction
+def envelope(y, rate, threshold):
+    mask = []
+    y = pd.Series(y).apply(np.abs)
+    y_mean = y.rolling(window=int(rate/10), min_periods=1, center=True).mean()
+
+    for mean in y_mean:
+        if mean > threshold:
+            mask.append(True)
+        else:
+            mask.append(False)
+    return mask
+
+# Directories for training and test sets (Google Drive paths)
+train_audio_dir = "/content/drive/MyDrive/Thesis/Data_T/Train"  # Replace with your actual Google Drive train folder path
+test_audio_dir = "/content/drive/MyDrive/Thesis/Data_T/Test"    # Replace with your actual Google Drive test folder path
+
+def preprocess_audio_data(audio_dir, output_dir):
+    # Walk through each label folder in the original audio directory
+    for label in os.listdir(audio_dir):
+        label_dir = os.path.join(audio_dir, label)
+
+        # Only process if it's a folder (skip any non-folder files)
+        if not os.path.isdir(label_dir):
+            continue
+
+        # Create corresponding label directory in output folder
+        label_output_dir = os.path.join(output_dir, label)
+        os.makedirs(label_output_dir, exist_ok=True)
+
+        file_names = [f for f in os.listdir(label_dir) if f.endswith('.wav')]
+
+        # Step 1: Clean the data (save cleaned audio data)
+        print(f"Cleaning data for label: {label}")
+        for f in tqdm(file_names):
+            signal, rate = librosa.load(os.path.join(label_dir, f), sr=16000)
+            mask = envelope(signal, rate, 0.0005)  # Assuming you have an envelope function to remove noise
+            clean_signal = signal[mask]  # Apply mask to clean the audio
+            clean_file_path = os.path.join(label_output_dir, f)  # Save clean audio file
+            wavfile.write(filename=clean_file_path, rate=rate, data=clean_signal)
+
+        # Step 2: Perform augmentations and noise generation on the cleaned data
+
+        # Augment and noise operations on the cleaned data in the same directory
+        print(f"Performing augmentation and adding noise for label: {label}")
+
+        for f in tqdm(file_names):
+            clean_file_path = os.path.join(label_output_dir, f)
+            clean_signal, rate = librosa.load(clean_file_path, sr=16000)
+
+            # Step 2.1: Pitch shift low (-5 semitones)
+            wav_pitch_low = librosa.effects.pitch_shift(clean_signal, sr=rate, n_steps=-5)
+            wavfile.write(filename=clean_file_path.replace('.wav', '_pitch_shift_low.wav'), rate=rate, data=wav_pitch_low)
+
+            # Step 2.2: Pitch shift high (+5 semitones)
+            wav_pitch_high = librosa.effects.pitch_shift(clean_signal, sr=rate, n_steps=5)
+            wavfile.write(filename=clean_file_path.replace('.wav', '_pitch_shift_high.wav'), rate=rate, data=wav_pitch_high)
+
+            # Step 2.3: Time stretch (fast)
+            wav_time_fast = librosa.effects.time_stretch(clean_signal, rate=1.2)
+            wavfile.write(filename=clean_file_path.replace('.wav', '_time_stretch_fast.wav'), rate=rate, data=wav_time_fast)
+
+            # Step 2.4: Time stretch (slow)
+            wav_time_slow = librosa.effects.time_stretch(clean_signal, rate=0.6)
+            wavfile.write(filename=clean_file_path.replace('.wav', '_time_stretch_slow.wav'), rate=rate, data=wav_time_slow)
+
+            # Step 2.5: Add noise
+            noisy_signal = clean_signal + 0.001 * np.random.normal(0, 1, len(clean_signal))
+            wavfile.write(filename=clean_file_path.replace('.wav', '_noisy.wav'), rate=rate, data=noisy_signal)
+
+# Preprocess the training data from Google Drive
+output_dir = "/content/drive/MyDrive/Thesis/Data_T/clean_train/"
+preprocess_audio_data(train_audio_dir, output_dir)
+
+# Preprocess the test data from Google Drive
+output_dir = "/content/drive/MyDrive/Thesis/Data_T/clean_test/"
+preprocess_audio_data(test_audio_dir, output_dir)
+
+!pip install python_speech_features
+
+# Import required libraries
+import os
+import numpy as np
+from scipy.io import wavfile
+import keras
+from tqdm import tqdm
+from python_speech_features import mfcc
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import LabelEncoder
+from keras.utils import to_categorical
+from keras.layers import (
+    Reshape, Conv2D, MaxPool2D, Flatten, LSTM, BatchNormalization, Dropout, Dense, TimeDistributed
+)
+from keras.models import Sequential
+import matplotlib.pyplot as plt
+
+# Step 2: Create the model using your provided structure
+# Define the model (CNN-LSTM)
+def create_model(input_shape):
+    model = Sequential()
+    model.add(BatchNormalization(axis=1, input_shape=input_shape))
+    model.add(
+        Conv2D(
+            32,
+            kernel_size=(3, 3),
+            activation="relu",
+            data_format="channels_last",
+            input_shape=input_shape,
+        )
+    )
+    model.add(
+        Conv2D(
+            64,
+            kernel_size=(3, 3),
+            activation="relu",
+            data_format="channels_last",
+            padding="same",
+        )
+    )
+    model.add(MaxPool2D(pool_size=(2, 2)))
+    model.add(
+        Conv2D(
+            128,
+            kernel_size=(3, 3),
+            activation="relu",
+            data_format="channels_last",
+            padding="same",
+        )
+    )
+    model.add(MaxPool2D(pool_size=(2, 2)))
+
+    # Reshape layer to prepare for LSTM input
+    resize_shape = model.output_shape[2] * model.output_shape[3]
+    model.add(Reshape((model.output_shape[1], resize_shape)))
+
+    # LSTM layers
+    model.add(LSTM(128, return_sequences=True))
+    model.add(BatchNormalization())
+    model.add(LSTM(128, return_sequences=True))
+    model.add(Dropout(0.2))
+    model.add(LSTM(128, return_sequences=True))
+    model.add(Dropout(0.3))
+    model.add(LSTM(128, return_sequences=True))
+    model.add(Dropout(0.3))
+    model.add(BatchNormalization())
+
+    # TimeDistributed Dense layers
+    model.add(TimeDistributed(Dense(64, activation="relu")))
+    model.add(TimeDistributed(Dense(32, activation="relu")))
+    model.add(BatchNormalization())
+    model.add(TimeDistributed(Dense(16, activation="relu")))
+    model.add(TimeDistributed(Dense(8, activation="relu")))
+
+    # Final output layer
+    model.add(Flatten())
+    model.add(Dense(5, activation="softmax"))  # Assuming 5 output classes
+
+    # Compile the model
+    model.compile(loss="categorical_crossentropy", optimizer="adam", metrics=["acc"])
+
+    return model
+
+# Directory where clean training data is stored (label folders with files inside)
+audio_dir = "/content/drive/MyDrive/Thesis/Data_T/clean_train"  # Update this with the actual path
+
+_x = []
+_y = []
+
+# Step 1: Extract the data and string labels
+# Iterate through each label folder (assuming label names are the folder names)
+for label in os.listdir(audio_dir):
+    label_dir = os.path.join(audio_dir, label)
+
+    # Only process if it's a folder (skip any non-folder files)
+    if not os.path.isdir(label_dir):
+        continue
+
+    # Get all .wav files in the label folder
+    file_names = [f for f in os.listdir(label_dir) if f.endswith(".wav")]
+
+    # Process each audio file in the folder
+    for f in tqdm(file_names, desc=f"Processing label {label}"):
+        # Extract MFCC features
+        rate, signal = wavfile.read(os.path.join(label_dir, f))
+        mel = mfcc(signal, rate, nfilt=26, numcep=26, nfft=512)
+        imarray = np.resize(mel, (250, 26))  # Resize or pad the MFCC features to a fixed size
+        _x.append(imarray)
+
+        # Append the label (string label from the folder name)
+        _y.append(label)
+
+# Convert the list of features and labels into numpy arrays
+x = np.array(_x, dtype="float32")
+y = np.array(_y)
+
+# Step 2: Encode the string labels into numeric values
+label_encoder = LabelEncoder()
+y_encoded = label_encoder.fit_transform(y)  # Convert string labels to numeric labels
+
+# Step 3: Split dataset into training and testing sets (75:25 ratio)
+x_train, x_test, y_train, y_test = train_test_split(x, y_encoded, test_size=0.25, random_state=42)
+
+print("Size of Training Data:", np.shape(x_train))
+print("Size of Training Labels:", np.shape(y_train))
+print("Size of Test Data:", np.shape(x_test))
+print("Size of Test Labels:", np.shape(y_test))
+
+# Step 4: Prepare the data for model training
+num_classes = len(label_encoder.classes_)  # Number of unique labels
+
+# One-hot encode the labels
+y_train = to_categorical(y_train, num_classes=num_classes)
+y_test = to_categorical(y_test, num_classes=num_classes)
+
+# Reshape the input data to match the expected input shape for the model (e.g., CNN expects 4D input)
+x_train = x_train.reshape(x_train.shape[0], x_train.shape[1], x_train.shape[2], 1)
+x_test = x_test.reshape(x_test.shape[0], x_test.shape[1], x_test.shape[2], 1)
+
+# Define the input shape for the model
+input_shape = (x_train.shape[1], x_train.shape[2], 1)
+
+# Step 5: Train the model
+model = create_model(input_shape)  # Use the previously defined model
+model.summary()
+
+# Train the model
+history = model.fit(
+    x_train,
+    y_train,
+    batch_size=20,
+    epochs=100,
+    verbose=1,
+    validation_data=(x_test, y_test)
+)
+
+# Step 6: Save the trained model
+# Save model architecture as .json
+model_json = model.to_json()
+with open("/content/drive/MyDrive/model.json", "w") as json_file:  # Update the path
+    json_file.write(model_json)
+
+# Save the entire model (architecture + weights) as .h5
+model.save("/content/drive/MyDrive/model.h5")  # Saves the entire model in one file
+print("Model (architecture + weights) has been saved to disk.")
+
+# Optionally, save only the weights as .weights.h5
+model.save_weights("/content/drive/MyDrive/model.weights.h5")  # Saves only the weights
+print("Model weights have been saved to disk.")
+
+# Save the entire model in the new Keras format
+model.save("/content/drive/MyDrive/model.keras")
+print("Model, including weights, optimizer state, and training configuration, has been saved in the new .keras format.")
+
+# Optionally, save the label encoder
+import pickle
+with open("//content/drive/MyDrive/label_encoder.pkl", "wb") as le_file:
+    pickle.dump(label_encoder, le_file)
+
+# Step 7: Plot training and validation accuracy and loss
+
+# Plot training & validation accuracy values
+plt.figure(figsize=(12, 6))
+plt.subplot(1, 2, 1)
+plt.plot(history.history['acc'])
+plt.plot(history.history['val_acc'])
+plt.title('Model Accuracy')
+plt.ylabel('Accuracy')
+plt.xlabel('Epoch')
+plt.legend(['Train', 'Test'], loc='upper left')
+
+# Plot training & validation loss values
+plt.subplot(1, 2, 2)
+plt.plot(history.history['loss'])
+plt.plot(history.history['val_loss'])
+plt.title('Model Loss')
+plt.ylabel('Loss')
+plt.xlabel('Epoch')
+plt.legend(['Train', 'Test'], loc='upper left')
+
+plt.tight_layout()
+plt.show()
+
+
+
+
+import os
+import numpy as np
+import librosa
+from scipy.io import wavfile
+from tqdm import tqdm
+from python_speech_features import mfcc
+from sklearn.preprocessing import LabelEncoder
+import pickle
+import pandas as pd
+import matplotlib.pyplot as plt
+from keras.models import load_model
+from keras.utils import to_categorical
+
+# Load the saved model (use '.keras' if it was saved in the new Keras format)
+model = load_model("C:/Users/never/Desktop/Thesis/Thesis/Models/model.keras")
+
+# Summary of the model to verify
+model.summary()
+
+# Load the Label Encoder
+with open("C:/Users/never/Desktop/Thesis/Thesis/Models/label_encoder.pkl", "rb") as le_file:
+    label_encoder = pickle.load(le_file)
+
+# Directory where the test data is stored
+test_data_dir = "C:/Users/never/Desktop/Thesis/Thesis/Data_T/clean_test"  # Update this with the actual path
+
+_x_test = []
+_y_test = []
+
+# Step 1: Extract the test data and string labels (assuming labels are folder names)
+for label in os.listdir(test_data_dir):
+    label_dir = os.path.join(test_data_dir, label)
+
+    # Only process if it's a folder (skip any non-folder files)
+    if not os.path.isdir(label_dir):
+        continue
+
+    # Get all .wav files in the label folder
+    file_names = [f for f in os.listdir(label_dir) if f.endswith(".wav")]
+
+    # Process each audio file in the folder
+    for f in tqdm(file_names, desc=f"Processing test label {label}"):
+        # Extract MFCC features from the audio file
+        rate, signal = wavfile.read(os.path.join(label_dir, f))
+        mel = mfcc(signal, rate, nfilt=26, numcep=26, nfft=512)
+        imarray = np.resize(mel, (250, 26))  # Resize or pad the MFCC features to a fixed size
+        _x_test.append(imarray)
+
+        # Append the label (string label from the folder name)
+        _y_test.append(label)
+
+# Convert the list of features and labels into numpy arrays
+x_test = np.array(_x_test, dtype="float32")
+y_test = np.array(_y_test)
+
+# Print total number of test cases
+total_cases = len(x_test)
+print(f"Total Number of Test Cases: {total_cases}")
+
+# Step 2: Encode the string labels into numeric values using the same label encoder from training
+y_test_encoded = label_encoder.transform(y_test)  # Convert string labels to numeric labels
+
+# Step 3: Prepare the data for model testing
+num_classes = len(label_encoder.classes_)  # Number of unique labels
+
+# One-hot encode the test labels
+y_test_one_hot = to_categorical(y_test_encoded, num_classes=num_classes)
+
+# Reshape the input data to match the expected input shape for the model
+x_test = x_test.reshape(x_test.shape[0], x_test.shape[1], x_test.shape[2], 1)
+
+# Step 4: Evaluate the model on the test data
+test_loss, test_accuracy = model.evaluate(x_test, y_test_one_hot)
+
+# Print out test loss and accuracy
+print(f"Test Loss: {test_loss}")
+print(f"Test Accuracy: {test_accuracy}")
+
+# Step 5: Predict labels for each test example
+y_pred = model.predict(x_test)
+y_pred_labels = np.argmax(y_pred, axis=1)  # Convert predictions to class indices
+
+# Step 6: Calculate binary accuracy for each class
+label_accuracy = {}
+
+# Loop over each unique label and calculate accuracy for that label
+for label_index, label_name in enumerate(label_encoder.classes_):
+    # Get indices for all instances of this label
+    label_indices = np.where(y_test_encoded == label_index)[0]
+
+    # Calculate accuracy for this label
+    true_labels = y_test_encoded[label_indices]  # These are class indices
+    predicted_labels = y_pred_labels[label_indices]  # These are also class indices
+
+    correct_predictions = np.sum(true_labels == predicted_labels)
+    total_predictions = len(label_indices)
+
+    accuracy = correct_predictions / total_predictions if total_predictions > 0 else 0
+    label_accuracy[label_name] = accuracy
+
+print(label_accuracy)
+
+# Step 7: Plot the binary labeling accuracy for each class
+plt.figure(figsize=(12, 6))
+plt.bar(label_accuracy.keys(), label_accuracy.values(), color='b')
+plt.xlabel('Label')
+plt.ylabel('Accuracy')
+plt.title('Binary Label Accuracy for Each Class')
+plt.xticks(rotation=45)
+plt.ylim(0, 1)
+plt.tight_layout()
+plt.show()
+
+# Step 5: Calculate binary results for each test case
+binary_results = []
+
+# Loop over each test case
+for i in range(len(y_test_encoded)):
+    if y_test_encoded[i] == y_pred_labels[i]:
+        binary_results.append(1)  # Correct prediction
+    else:
+        binary_results.append(0)  # Incorrect prediction
+
+# Step 6: Plot the binary results for each test case
+plt.figure(figsize=(15, 5))
+plt.bar(range(len(binary_results)), binary_results, color=['g' if val == 1 else 'r' for val in binary_results])
+plt.xlabel('Test Case Index')
+plt.ylabel('Prediction Accuracy (1 = Correct, 0 = Incorrect)')
+plt.title('Binary Graph of Prediction Accuracy for Each Test Case')
+plt.tight_layout()
+plt.show()
+
+# Function to preprocess and predict the label of a single audio file
+def predict_label_for_audio(audio_file_path):
+    # Step 1: Load the audio file
+    signal, rate = librosa.load(audio_file_path, sr=16000)
+
+    # Step 2: Clean the audio using the envelope function
+    mask = envelope(signal, rate, threshold=0.0005)
+    clean_signal = signal[np.array(mask)]  # Apply the mask to clean the signal
+
+    # Step 3: Extract MFCC features from the cleaned audio
+    mel = mfcc(clean_signal, rate, nfilt=26, numcep=26, nfft=512)
+
+    # Resize or pad MFCC to match the training input shape (250, 26)
+    mfcc_features = np.resize(mel, (250, 26))
+
+    # Step 4: Prepare the data for prediction (reshape to match model input)
+    mfcc_features = mfcc_features.reshape(1, mfcc_features.shape[0], mfcc_features.shape[1], 1)
+
+    # Step 5: Predict the label
+    prediction = model.predict(mfcc_features)
+
+    # Step 6: Decode the prediction to the label name
+    predicted_label_index = np.argmax(prediction, axis=1)[0]
+    predicted_label = label_encoder.inverse_transform([predicted_label_index])
+
+    return predicted_label[0]
+
+# Function to apply envelope-based noise reduction
+def envelope(y, rate, threshold):
+    mask = []
+    y = pd.Series(y).apply(np.abs)
+    y_mean = y.rolling(window=int(rate/10), min_periods=1, center=True).mean()
+
+    for mean in y_mean:
+        if mean > threshold:
+            mask.append(True)
+        else:
+            mask.append(False)
+    return mask
+
+# Test with a new audio file
+audio_file_path = "C:/Users/never/Desktop/Thesis/Thesis/Master Test/Theme.wav"  # Update this path to your new audio file
+predicted_label = predict_label_for_audio(audio_file_path)
+print(f"Predicted Label: {predicted_label}")
+
+import sounddevice as sd
+
+# Step: Record audio from live microphone and make a prediction
+def record_audio(duration=3, fs=16000):
+    print("Recording...")
+    audio = sd.rec(int(duration * fs), samplerate=fs, channels=1, dtype='float32')
+    sd.wait()  # Wait until the recording is finished
+    print("Recording finished.")
+    audio = audio.flatten()
+    return audio, fs
+
+# Predict label for new live-recorded audio
+def predict_live_audio():
+    # Record live audio from the microphone
+    signal, rate = record_audio(duration=3, fs=16000)  # Record 3 seconds of audio
+
+    # Apply envelope to clean the audio
+    mask = envelope(signal, rate, threshold=0.0005)
+    clean_signal = signal[np.array(mask)]
+
+    # Step 3: Handle empty input after cleaning
+    energy = np.sum(signal**2) / len(signal)
+    if energy < 0.001:  # Adjust the threshold for minimum energy if necessary
+        print("Low Energy")
+        return
+    
+    # Extract MFCC features
+    mel = mfcc(clean_signal, rate, nfilt=26, numcep=26, nfft=512)
+    imarray = np.resize(mel, (250, 26))  # Resize or pad MFCC features to a fixed size
+
+    # Prepare the input for the model
+    imarray = imarray.reshape(1, imarray.shape[0], imarray.shape[1], 1)
+    #print(imarray)
+
+    # Make prediction
+    predictions = model.predict(imarray)
+    predicted_label_index = np.argmax(predictions, axis=1)[0]
+    predicted_label = label_encoder.inverse_transform([predicted_label_index])
+
+    print(f"Predicted Label: {predicted_label[0]}")
+
+# Call the function to record and predict live audio
+predict_live_audio()
+
+this are my outputs
+
+Size of Training Data: (900, 250, 26)
+Size of Training Labels: (900,)
+Size of Test Data: (300, 250, 26)
+Size of Test Labels: (300,)
+
+training acc: 0.9989 - loss: 0.0235 - test_acc: 0.9300 - test_loss: 0.3444
+
+validation Loss: 1.5438201427459717 
+validation Accuracy: 0.8100000023841858
+
+{'1. Samne Jao': 0.8, '2. Pisone Jao': 0.8, '3. Dane Jao': 0.7666666666666667, '4. Bame Jao': 0.7833333333333333, '5. Theme Jao': 0.9}
+
+based on all these give me a demo report
